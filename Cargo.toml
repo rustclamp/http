@@ -1,0 +1,29 @@
+[package]
+name = "rustclamp-http"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96.1"
+description = "Optional Axum and Tower integration for RustClamp HTTP interfaces."
+repository = "https://github.com/rustclamp/http"
+publish = false
+
+[dependencies]
+axum = { version = "0.8.9", features = ["http1", "json", "tokio"] }
+bytes = "1.10"
+futures-core = "0.3"
+matchit = "0.8.4"
+rustclamp-core = { version = "0.1.0", path = "../core" }
+tokio = { version = "1.53.1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+tower-http = { version = "0.7.1", features = ["limit", "trace"] }
+
+[dev-dependencies]
+http-body-util = "0.1"
+futures-util = "0.3"
+tower = { version = "0.5", features = ["util"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"
+
+[lints.rustdoc]
+broken_intra_doc_links = "deny"
