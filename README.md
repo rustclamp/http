@@ -11,3 +11,10 @@ Applications may pass a developer-owned `TcpListener` to the graceful serving
 helper, or adopt the compiled router in an existing Axum server.
 
 See [Phase 6 boundary evidence](../rustclamp/docs/adr/0005-phase6-integration-boundaries.md).
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT) at your option. Unless you state otherwise, any
+contribution you submit for inclusion is dual licensed as above, without
+additional terms or conditions.

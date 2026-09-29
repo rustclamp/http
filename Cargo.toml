@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.96.1"
 description = "Optional Axum and Tower integration for RustClamp HTTP interfaces."
 repository = "https://github.com/rustclamp/http"
+license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
