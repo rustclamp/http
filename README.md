@@ -14,6 +14,16 @@ Enable the `ws` feature for WebSocket upgrades: `ws_route` builds a `GET` upgrad
 route whose open sockets receive a close frame (1001) when the shutdown signal
 fires, so they do not hold the graceful drain open.
 
+Optional features: `cors` (`with_cors`), `access-log` (`with_access_log`) and
+`rate-limit` (`with_rate_limit`, per-key fixed window, 429 problem+json with
+`Retry-After`). `with_request_context` answers 401 as problem+json, honors a
+valid `X-Request-Id` (else generates one) and echoes it; `require_role` answers
+403 from the roles `PrincipalResolver::roles` grants.
+
+HEAD and 405: Axum answers `HEAD` on a `get()` route and builds `Allow` itself
+(`GET,HEAD`); that behaviour is pinned by a test and not overridable per route.
+Register `head(...)` explicitly to answer HEAD differently.
+
 See [Phase 6 boundary evidence](../rustclamp/docs/adr/0005-phase6-integration-boundaries.md).
 
 ## License
