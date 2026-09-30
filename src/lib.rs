@@ -168,22 +168,32 @@ impl std::error::Error for RouteBuildError {}
 /// Serves a compiled router on a caller-owned listener with a bounded graceful drain.
 ///
 /// The caller owns `listener` and the Tokio runtime. On shutdown, Axum stops
-/// accepting connections and finishes active requests until `drain_timeout`;
-/// timing out drops the server future, cancelling outstanding request work.
+/// accepting connections and finishes active requests for up to
+/// `drain_timeout`, counted from the shutdown signal; timing out drops the
+/// server future, cancelling outstanding request work.
 pub async fn serve(
     listener: TcpListener,
     router: Router,
     shutdown: impl FutureShutdown,
     drain_timeout: Duration,
 ) -> io::Result<()> {
-    match tokio::time::timeout(
-        drain_timeout,
-        axum::serve(listener, router).with_graceful_shutdown(shutdown.wait()),
-    )
-    .await
-    {
-        Ok(result) => result,
-        Err(_) => Err(io::Error::new(
+    let (signalled, drain_started) = tokio::sync::oneshot::channel();
+    let signal = shutdown.wait();
+    let server = axum::serve(listener, router).with_graceful_shutdown(async move {
+        signal.await;
+        let _ = signalled.send(());
+    });
+    // The drain clock starts at the signal, not at startup.
+    let deadline = async move {
+        match drain_started.await {
+            Ok(()) => tokio::time::sleep(drain_timeout).await,
+            // The server stopped without a signal; its own result decides.
+            Err(_) => std::future::pending().await,
+        }
+    };
+    tokio::select! {
+        result = server => result,
+        () = deadline => Err(io::Error::new(
             io::ErrorKind::TimedOut,
             "HTTP graceful drain timed out",
         )),
