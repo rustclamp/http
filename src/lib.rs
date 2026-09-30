@@ -234,6 +234,11 @@ where
 pub trait PrincipalResolver: Send + Sync + 'static {
     /// Returns an authenticated principal or a rejected credential diagnostic.
     fn resolve(&self, headers: &HeaderMap) -> Result<Option<String>, String>;
+
+    /// Returns the roles granted to an authenticated principal; none by default.
+    fn roles(&self, _principal: &str) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// Cancellation flag shared by a request handler and its adapters.
@@ -256,6 +261,7 @@ impl RequestCancellation {
 #[derive(Clone, Debug)]
 pub struct RequestContext {
     principal: Option<Arc<str>>,
+    roles: Arc<[String]>,
     tenant: Option<Arc<str>>,
     correlation_id: Arc<str>,
     deadline: tokio::time::Instant,
@@ -266,6 +272,10 @@ impl RequestContext {
     /// Returns the authenticated principal, if one was resolved.
     pub fn principal(&self) -> Option<&str> {
         self.principal.as_deref()
+    }
+    /// Reports whether the resolver granted the principal `role`.
+    pub fn has_role(&self, role: &str) -> bool {
+        self.roles.iter().any(|granted| granted == role)
     }
     /// Returns the selected tenant, if supplied and accepted by the application.
     pub fn tenant(&self) -> Option<&str> {
@@ -313,15 +323,23 @@ async fn request_context_middleware(
 ) -> Response {
     let principal = match state.resolver.resolve(request.headers()) {
         Ok(principal) => principal,
-        Err(_) => return (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
+        Err(_) => return problem(StatusCode::UNAUTHORIZED, "unauthorized"),
     };
+    let roles = principal
+        .as_deref()
+        .map(|principal| state.resolver.roles(principal))
+        .unwrap_or_default();
     let tenant = text_header(request.headers(), "x-tenant-id");
-    let correlation = text_header(request.headers(), "x-correlation-id").unwrap_or_else(|| {
-        format!(
-            "request-{}",
-            CORRELATION_IDS.fetch_add(1, Ordering::Relaxed)
-        )
-    });
+    // ponytail: an invalid or missing id is replaced, never rejected.
+    let correlation = ["x-request-id", "x-correlation-id"]
+        .into_iter()
+        .find_map(|name| text_header(request.headers(), name).filter(|id| valid_request_id(id)))
+        .unwrap_or_else(|| {
+            format!(
+                "request-{}",
+                CORRELATION_IDS.fetch_add(1, Ordering::Relaxed)
+            )
+        });
     let requested = text_header(request.headers(), "x-timeout-ms")
         .and_then(|value| value.parse::<u64>().ok())
         .map(Duration::from_millis)
@@ -329,13 +347,47 @@ async fn request_context_middleware(
     let cancellation = RequestCancellation::default();
     request.extensions_mut().insert(RequestContext {
         principal: principal.map(Arc::from),
+        roles: roles.into(),
         tenant: tenant.map(Arc::from),
-        correlation_id: Arc::from(correlation),
+        correlation_id: Arc::from(correlation.as_str()),
         deadline: tokio::time::Instant::now() + requested.min(state.max_deadline),
         cancellation: cancellation.clone(),
     });
     let _cancel_on_drop = CancelOnDrop(cancellation);
-    next.run(request).await
+    let mut response = next.run(request).await;
+    if let Ok(value) = correlation.parse() {
+        response.headers_mut().insert("x-request-id", value);
+    }
+    response
+}
+
+/// Visible ASCII, 1 to 128 bytes.
+fn valid_request_id(id: &str) -> bool {
+    (1..=128).contains(&id.len()) && id.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
+fn problem(status: StatusCode, detail: &'static str) -> Response {
+    HttpError::new((), status, detail)
+        .problem_json()
+        .into_response()
+}
+
+/// Answers 401 (no principal) or 403 (role not granted) as problem+json.
+///
+/// Apply it to a route or router inside [`with_request_context`], which
+/// supplies the principal and roles.
+pub fn require_role(router: Router, role: &'static str) -> Router {
+    router.layer(middleware::from_fn(
+        move |request: Request, next: Next| async move {
+            match request.extensions().get::<RequestContext>() {
+                Some(context) if context.has_role(role) => next.run(request).await,
+                Some(context) if context.principal().is_some() => {
+                    problem(StatusCode::FORBIDDEN, "forbidden")
+                }
+                _ => problem(StatusCode::UNAUTHORIZED, "unauthorized"),
+            }
+        },
+    ))
 }
 
 static CORRELATION_IDS: AtomicU64 = AtomicU64::new(1);
@@ -506,6 +558,67 @@ pub fn with_extractor_body_limit(router: Router, max_bytes: usize) -> Router {
 /// the variant that lets 404/401/403 take precedence over 413.
 pub fn with_body_limit(router: Router, max_bytes: usize) -> Router {
     router.layer(tower_http::limit::RequestBodyLimitLayer::new(max_bytes))
+}
+
+/// Adds a CORS layer; build the policy with [`tower_http::cors`].
+#[cfg(feature = "cors")]
+pub fn with_cors(router: Router, cors: tower_http::cors::CorsLayer) -> Router {
+    router.layer(cors)
+}
+
+/// Logs one line per request and response through `tracing` at INFO.
+#[cfg(feature = "access-log")]
+pub fn with_access_log(router: Router) -> Router {
+    router.layer(tower_http::trace::TraceLayer::new_for_http())
+}
+
+/// Fixed-window per-key rate limit answering 429 problem+json with `Retry-After`.
+///
+/// `key` picks the bucket for a request (client address header, principal, ...);
+/// `None` skips limiting. At most `limit` requests per key per `window`.
+///
+/// ponytail: state is in-process and pruned lazily; use a shared store for a
+/// multi-instance limit.
+#[cfg(feature = "rate-limit")]
+pub fn with_rate_limit(
+    router: Router,
+    limit: u32,
+    window: Duration,
+    key: fn(&Request) -> Option<String>,
+) -> Router {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use std::time::Instant;
+    let windows: Arc<Mutex<HashMap<String, (Instant, u32)>>> = Arc::default();
+    router.layer(middleware::from_fn(move |request: Request, next: Next| {
+        let windows = windows.clone();
+        async move {
+            let retry_after = key(&request).and_then(|key| {
+                let now = Instant::now();
+                let mut windows = windows.lock().unwrap_or_else(|e| e.into_inner());
+                if windows.len() > 1024 {
+                    windows.retain(|_, (start, _)| now.duration_since(*start) < window);
+                }
+                let entry = windows.entry(key).or_insert((now, 0));
+                if now.duration_since(entry.0) >= window {
+                    *entry = (now, 0);
+                }
+                entry.1 += 1;
+                (entry.1 > limit).then(|| window.saturating_sub(now.duration_since(entry.0)))
+            });
+            match retry_after {
+                None => next.run(request).await,
+                Some(wait) => {
+                    let mut response =
+                        problem(StatusCode::TOO_MANY_REQUESTS, "rate limit exceeded");
+                    response
+                        .headers_mut()
+                        .insert("retry-after", wait.as_secs().max(1).into());
+                    response
+                }
+            }
+        }
+    }))
 }
 
 /// Boxed future borrowing the socket for the duration of a WebSocket session.

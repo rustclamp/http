@@ -540,3 +540,146 @@ async fn shutdown_sends_a_close_frame_to_open_websockets_and_ends_the_drain() {
     // Drain finished well inside the 5s timeout.
     server.await.unwrap().unwrap();
 }
+
+struct Roles;
+impl PrincipalResolver for Roles {
+    fn resolve(&self, headers: &HeaderMap) -> Result<Option<String>, String> {
+        Ok(headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned))
+    }
+    fn roles(&self, principal: &str) -> Vec<String> {
+        if principal == "admin" {
+            vec!["admin".into()]
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+async fn send(
+    router: &Router,
+    method: &str,
+    auth: Option<&str>,
+    id: Option<&str>,
+) -> axum::response::Response {
+    let mut builder = Request::builder().method(method).uri("/");
+    if let Some(auth) = auth {
+        builder = builder.header("authorization", auth);
+    }
+    if let Some(id) = id {
+        builder = builder.header("x-request-id", id);
+    }
+    router
+        .clone()
+        .oneshot(builder.body(Body::empty()).unwrap())
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn unauthorized_and_forbidden_are_problem_json_and_request_id_is_echoed() {
+    let router = with_request_context(
+        rustclamp_http::require_role(Router::new().route("/", get(|| async { "ok" })), "admin"),
+        Arc::new(Roles),
+        Duration::from_secs(1),
+    );
+    let denied = send(&router, "GET", None, Some("abc-123")).await;
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(denied.headers()["content-type"], "application/problem+json");
+    assert_eq!(denied.headers()["x-request-id"], "abc-123");
+    let forbidden = send(&router, "GET", Some("user"), None).await;
+    assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        forbidden.headers()["content-type"],
+        "application/problem+json"
+    );
+    let generated = forbidden.headers()["x-request-id"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(generated.starts_with("request-"));
+    let ok = send(&router, "GET", Some("admin"), Some("has space")).await;
+    assert_eq!(ok.status(), StatusCode::OK);
+    assert!(
+        ok.headers()["x-request-id"]
+            .to_str()
+            .unwrap()
+            .starts_with("request-")
+    );
+}
+
+#[tokio::test]
+async fn head_and_unmatched_methods_follow_axum_routing() {
+    let router = Router::new().route("/", get(|| async { "ok" }));
+    let head = send(&router, "HEAD", None, None).await;
+    assert_eq!(head.status(), StatusCode::OK);
+    let post = send(&router, "POST", None, None).await;
+    assert_eq!(post.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(post.headers()["allow"], "GET,HEAD");
+}
+
+#[cfg(feature = "rate-limit")]
+#[tokio::test]
+async fn rate_limit_answers_429_problem_json_with_retry_after() {
+    let router = rustclamp_http::with_rate_limit(
+        Router::new().route("/", get(|| async { "ok" })),
+        2,
+        Duration::from_secs(60),
+        |request| {
+            Some(
+                request
+                    .headers()
+                    .get("authorization")?
+                    .to_str()
+                    .ok()?
+                    .to_owned(),
+            )
+        },
+    );
+    for _ in 0..2 {
+        assert_eq!(
+            send(&router, "GET", Some("a"), None).await.status(),
+            StatusCode::OK
+        );
+    }
+    let limited = send(&router, "GET", Some("a"), None).await;
+    assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        limited.headers()["content-type"],
+        "application/problem+json"
+    );
+    assert!(
+        limited.headers()["retry-after"]
+            .to_str()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap()
+            <= 60
+    );
+    assert_eq!(
+        send(&router, "GET", Some("b"), None).await.status(),
+        StatusCode::OK
+    );
+}
+
+#[cfg(all(feature = "cors", feature = "access-log"))]
+#[tokio::test]
+async fn cors_and_access_log_layers_wrap_the_router() {
+    let router = rustclamp_http::with_access_log(rustclamp_http::with_cors(
+        Router::new().route("/", get(|| async { "ok" })),
+        rustclamp_http::tower_http::cors::CorsLayer::permissive(),
+    ));
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri("/")
+                .header("origin", "http://x.test")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.headers()["access-control-allow-origin"], "*");
+}

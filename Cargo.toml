@@ -10,6 +10,9 @@ publish = false
 
 [features]
 ws = ["axum/ws"]
+cors = ["tower-http/cors"]
+access-log = ["tower-http/trace"]
+rate-limit = []
 
 [dependencies]
 axum = { version = "0.8.9", features = ["http1", "json", "tokio"] }
