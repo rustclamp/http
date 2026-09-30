@@ -10,6 +10,10 @@ and request types directly. The integration adds no custom server protocol.
 Applications may pass a developer-owned `TcpListener` to the graceful serving
 helper, or adopt the compiled router in an existing Axum server.
 
+Enable the `ws` feature for WebSocket upgrades: `ws_route` builds a `GET` upgrade
+route whose open sockets receive a close frame (1001) when the shutdown signal
+fires, so they do not hold the graceful drain open.
+
 See [Phase 6 boundary evidence](../rustclamp/docs/adr/0005-phase6-integration-boundaries.md).
 
 ## License
