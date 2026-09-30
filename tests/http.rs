@@ -381,3 +381,54 @@ async fn graceful_shutdown_finishes_inflight_requests_and_reports_port_conflict(
     assert!(String::from_utf8_lossy(&response).contains("drained"));
     server.await.unwrap().unwrap();
 }
+
+#[tokio::test]
+async fn drain_timeout_counts_from_the_shutdown_signal_not_startup() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+    use tokio::sync::watch;
+
+    let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(error) => panic!("bind listener: {error}"),
+    };
+    let address = listener.local_addr().unwrap();
+    let router = Router::new()
+        .route("/", get(|| async { "ready" }))
+        .route("/stuck", get(std::future::pending::<&'static str>));
+    let (sender, receiver) = watch::channel(false);
+    let server = tokio::spawn(rustclamp_http::serve(
+        listener,
+        router,
+        rustclamp_http::ShutdownReceiver(receiver),
+        Duration::from_millis(50),
+    ));
+    let get = |path: &'static str| async move {
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        let request =
+            format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        stream.write_all(request.as_bytes()).await.unwrap();
+        stream
+    };
+
+    // Well past the drain timeout, the server still answers.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !server.is_finished(),
+        "server stopped without a shutdown signal"
+    );
+    let mut response = Vec::new();
+    get("/").await.read_to_end(&mut response).await.unwrap();
+    assert!(String::from_utf8_lossy(&response).contains("ready"));
+
+    // After the signal, a request that never finishes is cut off at the deadline.
+    let _stuck = get("/stuck").await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    sender.send(true).unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(2), server)
+        .await
+        .expect("drain deadline enforced")
+        .unwrap();
+    assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+}
