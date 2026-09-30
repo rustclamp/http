@@ -304,6 +304,7 @@ dependencies = [
  "http-body-util",
  "matchit",
  "rustclamp-core",
+ "serde_json",
  "tokio",
  "tower",
  "tower-http",
