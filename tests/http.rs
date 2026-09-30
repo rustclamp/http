@@ -432,3 +432,37 @@ async fn drain_timeout_counts_from_the_shutdown_signal_not_startup() {
         .unwrap();
     assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
 }
+
+#[cfg(feature = "ws")]
+#[tokio::test]
+async fn shutdown_sends_a_close_frame_to_open_websockets_and_ends_the_drain() {
+    use futures_util::StreamExt;
+    use rustclamp_http::{ShutdownReceiver, ws_route};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let (stop, watch) = tokio::sync::watch::channel(false);
+    // The session never ends on its own; only shutdown can close it.
+    let route = ws_route(watch.clone(), |_socket| Box::pin(std::future::pending()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(rustclamp_http::serve(
+        listener,
+        Router::new().route("/ws", route),
+        ShutdownReceiver(watch),
+        Duration::from_secs(5),
+    ));
+    let (mut client, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+        .await
+        .unwrap();
+    stop.send(true).unwrap();
+    let next = tokio::time::timeout(Duration::from_secs(2), client.next())
+        .await
+        .expect("no frame after shutdown");
+    match next {
+        Some(Ok(Message::Close(Some(frame)))) => assert_eq!(u16::from(frame.code), 1001),
+        other => panic!("expected close frame, got {other:?}"),
+    }
+    drop(client);
+    // Drain finished well inside the 5s timeout.
+    server.await.unwrap().unwrap();
+}
