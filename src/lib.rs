@@ -507,3 +507,37 @@ pub fn with_extractor_body_limit(router: Router, max_bytes: usize) -> Router {
 pub fn with_body_limit(router: Router, max_bytes: usize) -> Router {
     router.layer(tower_http::limit::RequestBodyLimitLayer::new(max_bytes))
 }
+
+/// Boxed future borrowing the socket for the duration of a WebSocket session.
+#[cfg(feature = "ws")]
+pub type SocketFuture<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
+
+/// Builds a `GET` upgrade route whose sockets are closed when `shutdown` fires.
+///
+/// `handler` runs one session on the upgraded socket. When the shutdown signal
+/// fires first, the session future is dropped and the peer receives a close
+/// frame (1001, going away), so upgraded connections do not hold the graceful
+/// drain open until its timeout.
+#[cfg(feature = "ws")]
+pub fn ws_route<H>(shutdown: tokio::sync::watch::Receiver<bool>, handler: H) -> MethodRouter
+where
+    H: for<'a> Fn(&'a mut axum::extract::ws::WebSocket) -> SocketFuture<'a>
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+{
+    use axum::extract::ws::{CloseFrame, Message, WebSocketUpgrade, close_code};
+    axum::routing::get(move |upgrade: WebSocketUpgrade| async move {
+        upgrade.on_upgrade(move |mut socket| async move {
+            let stop = ShutdownReceiver(shutdown).wait();
+            tokio::select! {
+                () = handler(&mut socket) => {}
+                () = stop => {
+                    let frame = CloseFrame { code: close_code::AWAY, reason: "server shutting down".into() };
+                    let _ = socket.send(Message::Close(Some(frame))).await;
+                }
+            }
+        })
+    })
+}

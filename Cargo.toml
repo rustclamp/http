@@ -8,6 +8,9 @@ repository = "https://github.com/rustclamp/http"
 license = "MIT OR Apache-2.0"
 publish = false
 
+[features]
+ws = ["axum/ws"]
+
 [dependencies]
 axum = { version = "0.8.9", features = ["http1", "json", "tokio"] }
 bytes = "1.10"
@@ -21,6 +24,7 @@ tower-http = { version = "0.7.1", features = ["limit", "trace"] }
 [dev-dependencies]
 http-body-util = "0.1"
 futures-util = "0.3"
+tokio-tungstenite = "0.29"
 tower = { version = "0.5", features = ["util"] }
 
 [lints.rust]
