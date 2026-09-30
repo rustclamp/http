@@ -30,6 +30,8 @@ use tokio::net::TcpListener;
 
 /// Underlying Axum types remain available to callers.
 pub use axum as ecosystem;
+/// Tokio remains available so callers bind the listener `serve` expects.
+pub use tokio;
 /// Tower HTTP middleware remains available to callers.
 pub use tower_http;
 
@@ -215,6 +217,16 @@ pub struct ShutdownReceiver(pub tokio::sync::watch::Receiver<bool>);
 impl FutureShutdown for ShutdownReceiver {
     fn wait(mut self) -> PinFuture {
         Box::pin(async move { while !*self.0.borrow() && self.0.changed().await.is_ok() {} })
+    }
+}
+
+/// Any `Send` future, e.g. `rustclamp_runtime::tokio_runtime::shutdown_signal()`, is a shutdown signal.
+impl<F> FutureShutdown for F
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    fn wait(self) -> PinFuture {
+        Box::pin(self)
     }
 }
 
@@ -406,6 +418,8 @@ pub struct HttpError<E> {
     source: E,
     status: StatusCode,
     public_message: &'static str,
+    problem: bool,
+    field_errors: BTreeMap<String, Vec<String>>,
 }
 
 impl<E> HttpError<E> {
@@ -415,7 +429,26 @@ impl<E> HttpError<E> {
             source,
             status,
             public_message,
+            problem: false,
+            field_errors: BTreeMap::new(),
         }
+    }
+    /// Renders an RFC 9457 `application/problem+json` body instead of plain text.
+    pub fn problem_json(mut self) -> Self {
+        self.problem = true;
+        self
+    }
+    /// Adds a field-level validation message under `errors`; implies [`Self::problem_json`].
+    pub fn with_field_error(
+        mut self,
+        field: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        self.field_errors
+            .entry(field.into())
+            .or_default()
+            .push(message.into());
+        self.problem_json()
     }
     /// Returns the original typed error for internal diagnostics.
     pub fn source_error(&self) -> &E {
@@ -425,7 +458,24 @@ impl<E> HttpError<E> {
 
 impl<E> IntoResponse for HttpError<E> {
     fn into_response(self) -> Response {
-        (self.status, self.public_message).into_response()
+        if !self.problem {
+            return (self.status, self.public_message).into_response();
+        }
+        let mut body = serde_json::json!({
+            "type": "about:blank",
+            "title": self.status.canonical_reason().unwrap_or("Error"),
+            "status": self.status.as_u16(),
+            "detail": self.public_message,
+        });
+        if !self.field_errors.is_empty() {
+            body["errors"] = serde_json::json!(self.field_errors);
+        }
+        (
+            self.status,
+            [(axum::http::header::CONTENT_TYPE, "application/problem+json")],
+            body.to_string(),
+        )
+            .into_response()
     }
 }
 
@@ -438,7 +488,22 @@ where
     Body::from_stream(stream)
 }
 
+/// Caps bodies read by extractors (`Bytes`, `Json`, ...) at `max_bytes`.
+///
+/// Unlike [`with_body_limit`] the check runs when a handler reads the body, so
+/// routing (404/405) and layers such as [`with_request_context`] (401) answer
+/// first and only then 413 applies.
+///
+/// ponytail: handlers that consume `Body` directly bypass it; use
+/// [`with_body_limit`] when every byte must be capped.
+pub fn with_extractor_body_limit(router: Router, max_bytes: usize) -> Router {
+    router.layer(axum::extract::DefaultBodyLimit::max(max_bytes))
+}
+
 /// Applies Tower HTTP's request-body limit layer.
+///
+/// It rejects before routing and auth; see [`with_extractor_body_limit`] for
+/// the variant that lets 404/401/403 take precedence over 413.
 pub fn with_body_limit(router: Router, max_bytes: usize) -> Router {
     router.layer(tower_http::limit::RequestBodyLimitLayer::new(max_bytes))
 }

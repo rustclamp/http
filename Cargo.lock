@@ -436,6 +436,7 @@ dependencies = [
  "http-body-util",
  "matchit",
  "rustclamp-core",
+ "serde_json",
  "tokio",
  "tokio-tungstenite",
  "tower",

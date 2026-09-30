@@ -433,6 +433,80 @@ async fn drain_timeout_counts_from_the_shutdown_signal_not_startup() {
     assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
 }
 
+#[tokio::test]
+async fn problem_json_carries_status_detail_and_field_errors_without_the_source() {
+    use http_body_util::BodyExt;
+    let response = rustclamp_http::HttpError::new(
+        std::io::Error::other("password=secret"),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "validation failed",
+    )
+    .with_field_error("email", "must be an address")
+    .with_field_error("email", "too long")
+    .into_response();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        response.headers()["content-type"],
+        "application/problem+json"
+    );
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["status"], 422);
+    assert_eq!(json["title"], "Unprocessable Entity");
+    assert_eq!(json["detail"], "validation failed");
+    assert_eq!(
+        json["errors"]["email"],
+        serde_json::json!(["must be an address", "too long"])
+    );
+    assert!(!String::from_utf8_lossy(&body).contains("secret"));
+}
+
+#[tokio::test]
+async fn extractor_body_limit_lets_routing_and_auth_answer_before_413() {
+    struct Reject;
+    impl PrincipalResolver for Reject {
+        fn resolve(&self, _: &HeaderMap) -> Result<Option<String>, String> {
+            Err("bad credential".into())
+        }
+    }
+    let send = |router: Router, uri: &'static str| async move {
+        router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-length", "4")
+                    .body(Body::from("four"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+    };
+    let app = || {
+        Router::new().route(
+            "/",
+            post(|body: axum::body::Bytes| async move { body.len().to_string() }),
+        )
+    };
+    let open = rustclamp_http::with_extractor_body_limit(app(), 3);
+    assert_eq!(send(open.clone(), "/").await, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(send(open, "/missing").await, StatusCode::NOT_FOUND);
+    let guarded = with_request_context(app(), Arc::new(Reject), Duration::from_secs(1));
+    let guarded = rustclamp_http::with_extractor_body_limit(guarded, 3);
+    assert_eq!(send(guarded, "/").await, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn any_future_is_a_shutdown_signal() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let served = rustclamp_http::serve(listener, Router::new(), async {}, Duration::from_secs(5));
+    tokio::time::timeout(Duration::from_secs(2), served)
+        .await
+        .expect("serve did not stop")
+        .unwrap();
+}
+
 #[cfg(feature = "ws")]
 #[tokio::test]
 async fn shutdown_sends_a_close_frame_to_open_websockets_and_ends_the_drain() {
