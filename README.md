@@ -1,30 +1,56 @@
+<img src="https://docs.rustclamp.com/assets/rustclamp-logo.png" alt="RustClamp logo" width="160">
+
 # rustclamp-http
 
-Optional HTTP integration built on Axum and Tower. It owns route contribution
-validation and compilation while returning the underlying Axum `Router` for
-application-owned middleware, testing, and listener lifetimes. Core and Kernel
-remain independent of HTTP types.
+Axum and Tower integration for [RustClamp](https://github.com/rustclamp/rustclamp).
+Modules contribute routes; this crate validates them (duplicate paths fail at
+composition time) and compiles them into a plain Axum `Router`. You keep the
+listener, the runtime and any extra middleware. Core and Kernel stay free of HTTP types.
 
-Axum was selected because it uses Tower services/layers and exposes its router
-and request types directly. The integration adds no custom server protocol.
-Applications may pass a developer-owned `TcpListener` to the graceful serving
-helper, or adopt the compiled router in an existing Axum server.
+## Install
 
-Enable the `ws` feature for WebSocket upgrades: `ws_route` builds a `GET` upgrade
-route whose open sockets receive a close frame (1001) when the shutdown signal
-fires, so they do not hold the graceful drain open.
+Not yet published to crates.io; depend on it from git (Rust 1.96.1+, edition 2024):
 
-Optional features: `cors` (`with_cors`), `access-log` (`with_access_log`) and
-`rate-limit` (`with_rate_limit`, per-key fixed window, 429 problem+json with
-`Retry-After`). `with_request_context` answers 401 as problem+json, honors a
-valid `X-Request-Id` (else generates one) and echoes it; `require_role` answers
-403 from the roles `PrincipalResolver::roles` grants.
+```toml
+[dependencies]
+rustclamp-http = { git = "https://github.com/rustclamp/http" }
+```
 
-HEAD and 405: Axum answers `HEAD` on a `get()` route and builds `Allow` itself
-(`GET,HEAD`); that behaviour is pinned by a test and not overridable per route.
-Register `head(...)` explicitly to answer HEAD differently.
+## Example
 
-See [Phase 6 boundary evidence](../rustclamp/docs/adr/0005-phase6-integration-boundaries.md).
+```rust
+use axum::routing::get;
+use rustclamp_core::{ContributionTarget, ModuleId};
+use rustclamp_http::{HttpRoute, HttpRoutes, Public};
+
+const USERS: ModuleId = ModuleId::new("app.users");
+
+let routes = vec![(USERS, HttpRoute::<Public>::new("/users", get(|| async { "users" })))];
+let router = HttpRoutes::<Public>::new().build(&routes)?;
+// serve(listener, router, shutdown, drain_timeout).await
+```
+
+## Main API
+
+- `HttpRoute`, `HttpRoutes`, `RouteBuildError`: route contribution and compilation, per qualifier (`Public` is provided).
+- `serve`: graceful serving on a caller-owned `TcpListener`; the drain timeout starts at the shutdown signal.
+- `with_request_context`, `RequestContext`, `PrincipalResolver`: principal, tenant, deadline and cancellation per request; honors a valid `X-Request-Id` or generates one, and echoes it. Missing auth answers 401 as problem+json.
+- `require_role`: 403 problem+json unless `PrincipalResolver::roles` grants the role.
+- `HttpError` (`problem_json`, `with_field_error`), `negotiate`, `streaming_body`.
+- `with_body_limit`, `with_extractor_body_limit`: request size limits.
+
+`HEAD` and `405` `Allow` handling is Axum's; register `head(...)` explicitly to answer `HEAD` differently.
+
+## Features
+
+| Feature | Adds |
+| --- | --- |
+| `cors` | `with_cors` |
+| `access-log` | `with_access_log` |
+| `rate-limit` | `with_rate_limit`: in-process fixed window per key, 429 problem+json with `Retry-After` |
+| `ws` | `ws_route`: `GET` WebSocket upgrade; open sockets get a close frame (1001) on shutdown so they do not hold the drain open |
+
+Full documentation: <https://docs.rustclamp.com>
 
 ## License
 
