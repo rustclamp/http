@@ -91,6 +91,32 @@ impl<Q: Qualifier> HttpRoute<Q> {
         }
     }
 
+    /// Contributes a tonic service (a generated `FooServer`) at its gRPC path
+    /// prefix `/package.Service/`, beside ordinary routes on the same listener.
+    ///
+    /// The service sees the full request path, so it answers its own unknown
+    /// methods with gRPC `Unimplemented`. Two contributions of one service
+    /// fail [`HttpRoutes::build`] like any duplicate path.
+    #[cfg(feature = "grpc")]
+    pub fn grpc<S>(service: S) -> Self
+    where
+        S: tonic::server::NamedService
+            + tonic::codegen::Service<Request, Error = std::convert::Infallible>
+            + Clone
+            + Send
+            + Sync
+            + 'static,
+        S::Response: IntoResponse + 'static,
+        S::Future: Send + 'static,
+    {
+        // ponytail: a catch-all route, not a nest: nesting would strip the
+        // prefix the generated service matches on.
+        Self::new(
+            format!("/{}/{{*method}}", S::NAME),
+            axum::routing::any_service(service),
+        )
+    }
+
     /// Returns the declared route path, or the prefix of a mounted router.
     pub fn path(&self) -> &str {
         &self.path
