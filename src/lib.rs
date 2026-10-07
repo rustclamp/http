@@ -50,11 +50,18 @@ pub const HTTP_ROUTE_CONTRIBUTION: ContributionId = ContributionId::new("rustcla
 pub const HTTP_ROUTES_TARGET: ContributionTargetId =
     ContributionTargetId::new("rustclamp.http.routes");
 
-/// One Axum method router contributed at a path under a typed qualifier.
+/// One Axum method router contributed at a path, or a whole Axum router
+/// mounted under a prefix, under a typed qualifier.
 pub struct HttpRoute<Q: Qualifier> {
     path: String,
-    router: MethodRouter,
+    entry: Entry,
     qualifier: PhantomData<Q>,
+}
+
+#[derive(Clone)]
+enum Entry {
+    Method(Box<MethodRouter>),
+    Mount(Router),
 }
 
 impl<Q: Qualifier> HttpRoute<Q> {
@@ -62,12 +69,29 @@ impl<Q: Qualifier> HttpRoute<Q> {
     pub fn new(path: impl Into<String>, router: MethodRouter) -> Self {
         Self {
             path: path.into(),
-            router,
+            entry: Entry::Method(Box::new(router)),
             qualifier: PhantomData,
         }
     }
 
-    /// Returns the declared route path.
+    /// Mounts an existing Axum router, with its nested routers, layers and
+    /// state already applied, under `prefix`: an Axum app joins Clamp as one
+    /// contribution instead of one per route.
+    ///
+    /// `prefix` is a static path such as `/legacy`; the router then answers
+    /// `/legacy` and everything below it. The prefix `/` mounts the router at
+    /// the root: it answers every request no other contribution matches.
+    /// A contributed path inside a mounted prefix, overlapping prefixes, or
+    /// two root mounts fail [`HttpRoutes::build`].
+    pub fn mount(prefix: impl Into<String>, router: Router) -> Self {
+        Self {
+            path: prefix.into(),
+            entry: Entry::Mount(router),
+            qualifier: PhantomData,
+        }
+    }
+
+    /// Returns the declared route path, or the prefix of a mounted router.
     pub fn path(&self) -> &str {
         &self.path
     }
@@ -77,7 +101,7 @@ impl<Q: Qualifier> Clone for HttpRoute<Q> {
     fn clone(&self) -> Self {
         Self {
             path: self.path.clone(),
-            router: self.router.clone(),
+            entry: self.entry.clone(),
             qualifier: PhantomData,
         }
     }
@@ -119,26 +143,87 @@ impl<Q: Qualifier> ContributionTarget for HttpRoutes<Q> {
         routes.sort_by(|left, right| left.1.path.cmp(&right.1.path).then(left.0.cmp(&right.0)));
         let mut router = Router::new();
         let mut by_path: BTreeMap<String, (ModuleId, MethodRouter)> = BTreeMap::new();
+        let mut mounts: Vec<(String, ModuleId, Router)> = Vec::new();
+        let mut root: Option<Router> = None;
         for (module, route) in routes {
-            paths
-                .insert(route.path.clone(), ())
-                .map_err(|_| RouteBuildError::ConflictingPath {
-                    path: route.path.clone(),
-                    contributor: module,
-                })?;
-            if by_path.contains_key(&route.path) {
+            let conflict = |path: &str| RouteBuildError::ConflictingPath {
+                path: path.to_owned(),
+                contributor: module,
+            };
+            match route.entry {
+                Entry::Method(method_router) => {
+                    paths
+                        .insert(route.path.clone(), ())
+                        .map_err(|_| conflict(&route.path))?;
+                    if by_path.contains_key(&route.path) {
+                        return Err(conflict(&route.path));
+                    }
+                    by_path.insert(route.path, (module, *method_router));
+                }
+                Entry::Mount(mounted) if route.path == "/" => {
+                    // Two fallbacks cannot share the root.
+                    if root.replace(mounted).is_some() {
+                        return Err(conflict("/"));
+                    }
+                }
+                Entry::Mount(mounted) => {
+                    let prefix = route.path;
+                    if !valid_mount_prefix(&prefix) {
+                        return Err(RouteBuildError::InvalidMount {
+                            prefix,
+                            contributor: module,
+                        });
+                    }
+                    for pattern in [prefix.clone(), format!("{prefix}/{{*rest}}")] {
+                        paths.insert(pattern, ()).map_err(|_| conflict(&prefix))?;
+                    }
+                    mounts.push((prefix, module, mounted));
+                }
+            }
+        }
+        // A mounted router owns its whole subtree: nothing else may claim a
+        // path inside it, where it would silently shadow the mounted route.
+        for (prefix, _, _) in &mounts {
+            let inside = |path: &str| {
+                path.strip_prefix(prefix.as_str())
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+            };
+            if let Some((path, (module, _))) = by_path.iter().find(|(path, _)| inside(path)) {
                 return Err(RouteBuildError::ConflictingPath {
-                    path: route.path,
-                    contributor: module,
+                    path: path.clone(),
+                    contributor: *module,
                 });
             }
-            by_path.insert(route.path, (module, route.router));
+            if let Some((path, module, _)) = mounts
+                .iter()
+                .find(|(other, _, _)| other != prefix && inside(other))
+            {
+                return Err(RouteBuildError::ConflictingPath {
+                    path: path.clone(),
+                    contributor: *module,
+                });
+            }
         }
         for (path, (_, method_router)) in by_path {
             router = router.route(&path, method_router);
         }
+        for (prefix, _, mounted) in mounts {
+            router = router.nest(&prefix, mounted);
+        }
+        if let Some(mounted) = root {
+            router = router.fallback_service(mounted);
+        }
         Ok(router)
     }
+}
+
+/// A static path below the root: Axum nests only those, and a trailing `/`
+/// would mount at a different path than the one declared.
+fn valid_mount_prefix(prefix: &str) -> bool {
+    prefix.len() > 1
+        && prefix.starts_with('/')
+        && !prefix.ends_with('/')
+        && !prefix.contains(['{', '}', '*'])
 }
 
 /// Route-target validation failure with contributor identity.
@@ -151,6 +236,13 @@ pub enum RouteBuildError {
         /// Contributor whose declaration conflicts.
         contributor: ModuleId,
     },
+    /// A mount prefix is not a static path such as `/legacy`.
+    InvalidMount {
+        /// Prefix as declared.
+        prefix: String,
+        /// Contributor of the mount.
+        contributor: ModuleId,
+    },
 }
 
 impl fmt::Display for RouteBuildError {
@@ -159,6 +251,14 @@ impl fmt::Display for RouteBuildError {
             Self::ConflictingPath { path, contributor } => write!(
                 formatter,
                 "HTTP route {path:?} from {} conflicts with another path",
+                contributor.as_str()
+            ),
+            Self::InvalidMount {
+                prefix,
+                contributor,
+            } => write!(
+                formatter,
+                "HTTP mount {prefix:?} from {} must be a static path below the root, like \"/legacy\"",
                 contributor.as_str()
             ),
         }
