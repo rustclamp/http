@@ -686,6 +686,74 @@ pub fn with_body_limit(router: Router, max_bytes: usize) -> Router {
     router.layer(tower_http::limit::RequestBodyLimitLayer::new(max_bytes))
 }
 
+/// Counts requests, `5xx` answers and time to response, and answers `GET path`
+/// with them in the Prometheus text format followed by `extra()`, the app's
+/// own metrics (`rustclamp::metrics::Registry::render`, or `String::new`).
+///
+/// Scrapes are not counted. Layers applied before this one do not wrap `path`
+/// and layers applied after do, so apply [`with_request_context`] afterwards
+/// (or [`require_role`] to the result) when the route needs a principal.
+///
+/// ponytail: one process-wide summary (sum and count), no per-route labels or
+/// histogram buckets; time stops at the response head, not the end of a
+/// streamed body. Add labels when a dashboard needs them.
+pub fn with_metrics<F>(router: Router, path: &'static str, extra: F) -> Router
+where
+    F: Fn() -> String + Clone + Send + Sync + 'static,
+{
+    #[derive(Default)]
+    struct Counts {
+        requests: AtomicU64,
+        server_errors: AtomicU64,
+        micros: AtomicU64,
+    }
+    let counts = Arc::new(Counts::default());
+    let scrape = Arc::clone(&counts);
+    router
+        .layer(middleware::from_fn(move |request: Request, next: Next| {
+            let counts = Arc::clone(&counts);
+            async move {
+                let started = std::time::Instant::now();
+                let response = next.run(request).await;
+                let micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+                counts.micros.fetch_add(micros, Ordering::Relaxed);
+                counts.requests.fetch_add(1, Ordering::Relaxed);
+                if response.status().is_server_error() {
+                    counts.server_errors.fetch_add(1, Ordering::Relaxed);
+                }
+                response
+            }
+        }))
+        .route(
+            path,
+            axum::routing::get(move || {
+                let counts = Arc::clone(&scrape);
+                let extra = extra.clone();
+                async move {
+                    let load = |count: &AtomicU64| count.load(Ordering::Relaxed);
+                    let body = format!(
+                        "# TYPE http_request_duration_seconds summary\n\
+                         http_request_duration_seconds_sum {:.6}\n\
+                         http_request_duration_seconds_count {}\n\
+                         # TYPE http_server_errors_total counter\n\
+                         http_server_errors_total {}\n{}",
+                        load(&counts.micros) as f64 / 1e6,
+                        load(&counts.requests),
+                        load(&counts.server_errors),
+                        extra(),
+                    );
+                    (
+                        [(
+                            axum::http::header::CONTENT_TYPE,
+                            "text/plain; version=0.0.4; charset=utf-8",
+                        )],
+                        body,
+                    )
+                }
+            }),
+        )
+}
+
 /// Adds a CORS layer; build the policy with [`tower_http::cors`].
 #[cfg(feature = "cors")]
 pub fn with_cors(router: Router, cors: tower_http::cors::CorsLayer) -> Router {

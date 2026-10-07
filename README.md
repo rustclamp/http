@@ -39,6 +39,7 @@ let router = HttpRoutes::<Public>::new().build(&routes)?;
 - `require_role`: 403 problem+json unless `PrincipalResolver::roles` grants the role.
 - `HttpError` (`problem_json`, `with_field_error`), `negotiate`, `streaming_body`.
 - `with_body_limit`, `with_extractor_body_limit`: request size limits.
+- `with_metrics`: request count, `5xx` count and latency at a Prometheus `/metrics` route, plus the app's own metrics.
 
 `HEAD` and `405` `Allow` handling is Axum's; register `head(...)` explicitly to answer `HEAD` differently.
 

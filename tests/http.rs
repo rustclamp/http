@@ -821,3 +821,33 @@ fn mounts_reject_overlaps_and_non_static_prefixes() {
         );
     }
 }
+
+#[tokio::test]
+async fn metrics_count_requests_and_server_errors_but_not_scrapes() {
+    let app = Router::new()
+        .route("/", get(|| async { "ok" }))
+        .route("/fail", get(|| async { StatusCode::INTERNAL_SERVER_ERROR }));
+    let app = rustclamp_http::with_metrics(app, "/metrics", || "jobs_total 2\n".to_owned());
+    let get = |uri: &'static str| {
+        app.clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+    };
+    get("/").await.unwrap();
+    get("/fail").await.unwrap();
+    get("/metrics").await.unwrap();
+    let response = get("/metrics").await.unwrap();
+    assert_eq!(
+        response.headers()["content-type"],
+        "text/plain; version=0.0.4; charset=utf-8"
+    );
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(
+        body.contains("http_request_duration_seconds_count 2\n"),
+        "{body}"
+    );
+    assert!(body.contains("http_server_errors_total 1\n"), "{body}");
+    assert!(body.ends_with("jobs_total 2\n"), "{body}");
+}
