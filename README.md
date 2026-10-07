@@ -49,6 +49,7 @@ let router = HttpRoutes::<Public>::new().build(&routes)?;
 | `cors` | `with_cors` |
 | `access-log` | `with_access_log` |
 | `rate-limit` | `with_rate_limit`: in-process fixed window per key, 429 problem+json with `Retry-After` |
+| `grpc` | `HttpRoute::grpc(FooServer::new(svc))`: a tonic service at `/package.Service/` beside your routes; `serve` then answers HTTP/1.1 and h2c on one port. Unknown methods answer gRPC `Unimplemented`. No TLS, gRPC-Web or reflection |
 | `ws` | `ws_route`: `GET` WebSocket upgrade; open sockets get a close frame (1001) on shutdown so they do not hold the drain open |
 
 Full documentation: <https://docs.rustclamp.com>

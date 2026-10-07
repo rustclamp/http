@@ -13,6 +13,7 @@ ws = ["axum/ws"]
 cors = ["tower-http/cors"]
 access-log = ["tower-http/trace"]
 rate-limit = []
+grpc = ["axum/http2", "dep:tonic"]
 
 [dependencies]
 axum = { version = "0.8.9", features = ["http1", "json", "tokio"] }
@@ -23,11 +24,15 @@ serde_json = "1"
 rustclamp-core = { version = "0.1.0", path = "../core" }
 tokio = { version = "1.53.1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
 tower-http = { version = "0.7.1", features = ["limit", "trace"] }
+tonic = { version = "0.14.6", default-features = false, features = ["codegen"], optional = true }
 
 [dev-dependencies]
 http-body-util = "0.1"
 futures-util = "0.3"
 tokio-tungstenite = "0.29"
+tonic = { version = "0.14.6", default-features = false, features = ["channel", "codegen"] }
+tonic-prost = "0.14.6"
+prost = "0.14"
 tower = { version = "0.5", features = ["util"] }
 
 [lints.rust]
