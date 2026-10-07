@@ -33,6 +33,7 @@ let router = HttpRoutes::<Public>::new().build(&routes)?;
 ## Main API
 
 - `HttpRoute`, `HttpRoutes`, `RouteBuildError`: route contribution and compilation, per qualifier (`Public` is provided).
+- `HttpRoute::mount(prefix, router)`: hand Clamp an existing `axum::Router` (nested routers, layers and state included) as one contribution. Under `/legacy` it answers that subtree; under `/` it answers every request no other contribution matches. A contributed path inside a mounted prefix, overlapping prefixes, or two root mounts fail the build.
 - `serve`: graceful serving on a caller-owned `TcpListener`; the drain timeout starts at the shutdown signal.
 - `with_request_context`, `RequestContext`, `PrincipalResolver`: principal, tenant, deadline and cancellation per request; honors a valid `X-Request-Id` or generates one, and echoes it. Missing auth answers 401 as problem+json.
 - `require_role`: 403 problem+json unless `PrincipalResolver::roles` grants the role.

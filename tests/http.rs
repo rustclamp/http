@@ -12,7 +12,7 @@ use axum::routing::{get, post};
 use axum::{Router, response::IntoResponse};
 use rustclamp_core::{ContributionTarget, ModuleId, Qualifier};
 use rustclamp_http::{
-    HttpRoute, HttpRoutes, PrincipalResolver, Public, Representation, negotiate,
+    HttpRoute, HttpRoutes, PrincipalResolver, Public, Representation, RouteBuildError, negotiate,
     with_request_context,
 };
 use tower::ServiceExt;
@@ -682,4 +682,142 @@ async fn cors_and_access_log_layers_wrap_the_router() {
         .await
         .unwrap();
     assert_eq!(response.headers()["access-control-allow-origin"], "*");
+}
+
+async fn call(router: &Router, uri: &str) -> (StatusCode, HeaderMap, String) {
+    let response = router
+        .clone()
+        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let (parts, body) = response.into_parts();
+    let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+    (
+        parts.status,
+        parts.headers,
+        String::from_utf8(bytes.to_vec()).unwrap(),
+    )
+}
+
+/// An app built with plain Axum: a nested router, shared state and a layer.
+fn existing_axum_app() -> Router {
+    let api = Router::new().route(
+        "/users/{id}",
+        get(
+            |axum::extract::Path(id): axum::extract::Path<u32>,
+             axum::extract::State(name): axum::extract::State<&'static str>| async move {
+                format!("{name} user {id}")
+            },
+        ),
+    );
+    Router::new()
+        .route("/", get(|| async { "legacy home" }))
+        .nest("/api", api)
+        .with_state("legacy")
+        .layer(axum::middleware::map_response(
+            |mut response: axum::response::Response| async move {
+                response
+                    .headers_mut()
+                    .insert("x-legacy", "1".parse().unwrap());
+                response
+            },
+        ))
+}
+
+#[tokio::test]
+async fn mounts_an_existing_axum_router_unchanged_beside_contributed_routes() {
+    let routes = vec![
+        (
+            FIRST,
+            HttpRoute::<Public>::new("/health", get(|| async { "ok" })),
+        ),
+        (
+            SECOND,
+            HttpRoute::<Public>::mount("/legacy", existing_axum_app()),
+        ),
+    ];
+    let router = HttpRoutes::<Public>::new().build(&routes).unwrap();
+
+    let (status, headers, body) = call(&router, "/legacy/api/users/7").await;
+    assert_eq!((status, body.as_str()), (StatusCode::OK, "legacy user 7"));
+    assert_eq!(
+        headers["x-legacy"], "1",
+        "the mounted router keeps its layer"
+    );
+    assert_eq!(call(&router, "/legacy").await.2, "legacy home");
+    let (status, headers, body) = call(&router, "/health").await;
+    assert_eq!((status, body.as_str()), (StatusCode::OK, "ok"));
+    assert!(
+        !headers.contains_key("x-legacy"),
+        "the layer stays inside the mount"
+    );
+    assert_eq!(
+        call(&router, "/legacy/missing").await.0,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn a_root_mount_answers_what_contributions_do_not() {
+    let routes = vec![
+        (FIRST, HttpRoute::<Public>::mount("/", existing_axum_app())),
+        (
+            SECOND,
+            HttpRoute::<Public>::new("/api/users/1", get(|| async { "clamp" })),
+        ),
+    ];
+    let router = HttpRoutes::<Public>::new().build(&routes).unwrap();
+    assert_eq!(call(&router, "/api/users/1").await.2, "clamp");
+    assert_eq!(call(&router, "/api/users/2").await.2, "legacy user 2");
+    assert_eq!(call(&router, "/").await.2, "legacy home");
+}
+
+#[test]
+fn mounts_reject_overlaps_and_non_static_prefixes() {
+    let conflict = |routes: Vec<(ModuleId, HttpRoute<Public>)>| {
+        HttpRoutes::<Public>::new().build(&routes).err()
+    };
+    let mount = |prefix: &str| HttpRoute::<Public>::mount(prefix, Router::new());
+
+    // A contributed path inside a mount would shadow the mounted route.
+    assert_eq!(
+        conflict(vec![
+            (FIRST, mount("/legacy")),
+            (
+                SECOND,
+                HttpRoute::new("/legacy/users", get(|| async { "" }))
+            ),
+        ]),
+        Some(RouteBuildError::ConflictingPath {
+            path: "/legacy/users".into(),
+            contributor: SECOND,
+        })
+    );
+    assert!(
+        conflict(vec![
+            (FIRST, mount("/legacy")),
+            (SECOND, mount("/legacy/v2"))
+        ])
+        .is_some()
+    );
+    assert!(conflict(vec![(FIRST, mount("/legacy")), (SECOND, mount("/legacy"))]).is_some());
+    assert!(conflict(vec![(FIRST, mount("/")), (SECOND, mount("/"))]).is_some());
+    // A sibling that only shares the first letters is not inside the mount.
+    assert!(
+        conflict(vec![
+            (FIRST, mount("/legacy")),
+            (SECOND, HttpRoute::new("/legacy-v2", get(|| async { "" }))),
+        ])
+        .is_none()
+    );
+    for prefix in ["", "legacy", "/legacy/", "/{tenant}", "/files/{*rest}"] {
+        assert_eq!(
+            conflict(vec![(FIRST, mount(prefix))]),
+            Some(RouteBuildError::InvalidMount {
+                prefix: prefix.into(),
+                contributor: FIRST,
+            }),
+            "{prefix:?}"
+        );
+    }
 }
