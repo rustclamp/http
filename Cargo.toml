@@ -1,6 +1,6 @@
 [package]
 name = "rustclamp-http"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.96.1"
 description = "Optional Axum and Tower integration for RustClamp HTTP interfaces."
@@ -25,7 +25,7 @@ bytes = "1.10"
 futures-core = "0.3"
 matchit = "0.8.4"
 serde_json = "1"
-rustclamp-core = { version = "0.1.0", path = "../core" }
+rustclamp-core = { version = "1.0.0", path = "../core" }
 tokio = { version = "1.53.1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
 tower-http = { version = "0.7.1", features = ["limit", "trace"] }
 tonic = { version = "0.14.6", default-features = false, features = ["codegen"], optional = true }
