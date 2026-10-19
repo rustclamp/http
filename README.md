@@ -9,11 +9,11 @@ listener, the runtime and any extra middleware. Core and Kernel stay free of HTT
 
 ## Install
 
-Not yet published to crates.io; depend on it from git (Rust 1.96.1+, edition 2024):
+Rust 1.96.1+, edition 2024:
 
 ```toml
 [dependencies]
-rustclamp-http = { git = "https://github.com/rustclamp/http" }
+rustclamp-http = "1"
 ```
 
 ## Example
