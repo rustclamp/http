@@ -40,6 +40,13 @@ let router = HttpRoutes::<Public>::new().build(&routes)?;
 - `HttpError` (`problem_json`, `with_field_error`), `negotiate`, `streaming_body`.
 - `with_body_limit`, `with_extractor_body_limit`: request size limits.
 - `with_metrics`: request count, `5xx` count and latency at a Prometheus `/metrics` route, plus the app's own metrics.
+- `with_health`, `Health`: `/livez` (200 while serving) and `/readyz` (200 between the lifecycle's `Ready` and the start of shutdown, and only while every named check passes within its timeout; otherwise 503 problem+json with each check's `ok`/`fail`/`timeout`, never the error). Apply it after auth so probes need no credentials:
+
+  ```rust
+  let health = Health::new(runner.readiness()) // AppRunner, or your own watch::Receiver<bool>
+      .check("db", move || { let db = db.clone(); async move { db.health().await } });
+  let router = with_health(with_request_context(router, resolver, deadline), health);
+  ```
 
 `HEAD` and `405` `Allow` handling is Axum's; register `head(...)` explicitly to answer `HEAD` differently.
 

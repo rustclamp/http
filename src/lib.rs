@@ -754,6 +754,148 @@ where
         )
 }
 
+type CheckFuture = std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>;
+type Check = Arc<dyn Fn() -> CheckFuture + Send + Sync>;
+
+/// Liveness and readiness probes served by [`with_health`].
+///
+/// Readiness follows `readiness`, a `watch` flag that is `true` while the app
+/// accepts traffic: `rustclamp_runtime::app::AppRunner::readiness` flips it at
+/// the `Ready` phase and back when shutdown begins. Apps without the runner
+/// drive their own `tokio::sync::watch::channel`.
+pub struct Health {
+    readiness: tokio::sync::watch::Receiver<bool>,
+    live_path: &'static str,
+    ready_path: &'static str,
+    timeout: Duration,
+    checks: Vec<(&'static str, Check)>,
+}
+
+impl Health {
+    /// Probes at `/livez` and `/readyz`, with a 1 second timeout per check.
+    pub fn new(readiness: tokio::sync::watch::Receiver<bool>) -> Self {
+        Self {
+            readiness,
+            live_path: "/livez",
+            ready_path: "/readyz",
+            timeout: Duration::from_secs(1),
+            checks: Vec::new(),
+        }
+    }
+
+    /// Serves liveness at `live` and readiness at `ready` instead.
+    #[must_use]
+    pub fn paths(mut self, live: &'static str, ready: &'static str) -> Self {
+        self.live_path = live;
+        self.ready_path = ready;
+        self
+    }
+
+    /// Bounds each check; one that takes longer reports `timeout`.
+    #[must_use]
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    /// Adds a named readiness check, e.g. `|| { let db = db.clone(); async move { db.health().await } }`.
+    ///
+    /// Checks run concurrently on every readiness probe. An `Err` reports
+    /// `fail`; the error itself is dropped, so it never reaches the response.
+    #[must_use]
+    pub fn check<F, Fut, E>(mut self, name: &'static str, check: F) -> Self
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<(), E>> + Send + 'static,
+    {
+        let check = move || -> CheckFuture {
+            let probe = check();
+            Box::pin(async move { probe.await.is_ok() })
+        };
+        self.checks.push((name, Arc::new(check)));
+        self
+    }
+
+    async fn ready(&self) -> Response {
+        if !*self.readiness.borrow() {
+            return not_ready("starting or shutting down", BTreeMap::new());
+        }
+        // A check that panics keeps `fail`.
+        let mut results: BTreeMap<_, _> = self
+            .checks
+            .iter()
+            .map(|(name, _)| (*name, "fail"))
+            .collect();
+        let mut running = tokio::task::JoinSet::new();
+        for (name, check) in &self.checks {
+            let (name, probe, timeout) = (*name, check(), self.timeout);
+            running.spawn(async move {
+                let status = match tokio::time::timeout(timeout, probe).await {
+                    Ok(true) => "ok",
+                    Ok(false) => "fail",
+                    Err(_) => "timeout",
+                };
+                (name, status)
+            });
+        }
+        while let Some(done) = running.join_next().await {
+            if let Ok((name, status)) = done {
+                results.insert(name, status);
+            }
+        }
+        if results.values().any(|status| *status != "ok") {
+            return not_ready("readiness check failed", results);
+        }
+        axum::Json(serde_json::json!({ "status": "ok", "checks": results })).into_response()
+    }
+}
+
+/// 503 as problem+json with each check's status under `checks`, no error text.
+fn not_ready(detail: &'static str, checks: BTreeMap<&'static str, &'static str>) -> Response {
+    let status = StatusCode::SERVICE_UNAVAILABLE;
+    let body = serde_json::json!({
+        "type": "about:blank",
+        "title": status.canonical_reason(),
+        "status": status.as_u16(),
+        "detail": detail,
+        "checks": checks,
+    });
+    (
+        status,
+        [(axum::http::header::CONTENT_TYPE, "application/problem+json")],
+        body.to_string(),
+    )
+        .into_response()
+}
+
+/// Answers `GET /livez` with 200 while the process serves, and `GET /readyz`
+/// with 200 only while `health`'s readiness flag is set and every check
+/// passes, otherwise 503 problem+json listing each check as `ok`, `fail` or
+/// `timeout`.
+///
+/// Like [`with_metrics`], layers applied before this one do not wrap the
+/// probes, so apply it after [`with_request_context`] and [`require_role`]:
+/// orchestrators probe without credentials.
+///
+/// ponytail: checks run on every probe, uncached; cache in the check itself if
+/// a dependency can't take the probe rate.
+pub fn with_health(router: Router, health: Health) -> Router {
+    let health = Arc::new(health);
+    let (live, ready) = (health.live_path, health.ready_path);
+    router
+        .route(
+            live,
+            axum::routing::get(|| async { axum::Json(serde_json::json!({ "status": "ok" })) }),
+        )
+        .route(
+            ready,
+            axum::routing::get(move || {
+                let health = Arc::clone(&health);
+                async move { health.ready().await }
+            }),
+        )
+}
+
 /// Adds a CORS layer; build the policy with [`tower_http::cors`].
 #[cfg(feature = "cors")]
 pub fn with_cors(router: Router, cors: tower_http::cors::CorsLayer) -> Router {
