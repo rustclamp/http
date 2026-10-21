@@ -28,6 +28,14 @@ use rustclamp_core::{
 };
 use tokio::net::TcpListener;
 
+#[cfg(feature = "idempotency")]
+mod idempotency;
+#[cfg(feature = "idempotency")]
+pub use idempotency::{
+    Claim, IDEMPOTENT_REPLAYED, Idempotency, IdempotencyError, IdempotencyKey, IdempotencyRecord,
+    IdempotencyStore, MemoryIdempotencyStore, StoreFuture, StoredResponse, with_idempotency,
+};
+
 /// Underlying Axum types remain available to callers.
 pub use axum as ecosystem;
 /// Tokio remains available so callers bind the listener `serve` expects.
