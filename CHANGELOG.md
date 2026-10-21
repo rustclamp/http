@@ -1,15 +1,10 @@
 # Changelog
 
-## Unreleased
+## 1.1.0 - 2026-10-21
 
 ### Added
 
 - Feature `idempotency`: `with_idempotency` makes requests carrying an `Idempotency-Key` header safe to retry (replay, 409 in flight, 422 on a different body; 5xx not cached), with an `IdempotencyStore` trait and `MemoryIdempotencyStore`. Adds `sha2` behind the feature.
-
-## 1.0.1 - 2026-10-21
-
-### Added
-
 - `with_health(router, Health)`: `GET /livez` answers 200 while the process serves;
   `GET /readyz` answers 200 only while the readiness flag is set and every named
   check passes, otherwise 503 problem+json listing each check as `ok`, `fail` or
