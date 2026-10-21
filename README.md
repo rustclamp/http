@@ -9,7 +9,7 @@ listener, the runtime and any extra middleware. Core and Kernel stay free of HTT
 
 ## Install
 
-Rust 1.96.1+, edition 2024:
+Rust 1.88+ (1.85+ without the `grpc` feature), edition 2024:
 
 ```toml
 [dependencies]

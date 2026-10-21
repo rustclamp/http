@@ -2,13 +2,14 @@
 name = "rustclamp-http"
 version = "1.0.0"
 edition = "2024"
-rust-version = "1.96.1"
+rust-version = "1.88"
 description = "Optional Axum and Tower integration for RustClamp HTTP interfaces."
 repository = "https://github.com/rustclamp/http"
 license = "MIT OR Apache-2.0"
 homepage = "https://rustclamp.com"
 documentation = "https://docs.rs/rustclamp-http"
 readme = "README.md"
+exclude = [".github/", ".gitignore", "rust-toolchain.toml"]
 keywords = ["framework", "http", "axum", "web"]
 categories = ["web-programming::http-server"]
 
