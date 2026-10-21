@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Feature `idempotency`: `with_idempotency` makes requests carrying an `Idempotency-Key` header safe to retry (replay, 409 in flight, 422 on a different body; 5xx not cached), with an `IdempotencyStore` trait and `MemoryIdempotencyStore`. Adds `sha2` behind the feature.
+
 ## 1.0.1 - 2026-10-21
 
 ### Added

@@ -58,6 +58,7 @@ let router = HttpRoutes::<Public>::new().build(&routes)?;
 | `access-log` | `with_access_log` |
 | `rate-limit` | `with_rate_limit`: in-process fixed window per key, 429 problem+json with `Retry-After` |
 | `grpc` | `HttpRoute::grpc(FooServer::new(svc))`: a tonic service at `/package.Service/` beside your routes; `serve` then answers HTTP/1.1 and h2c on one port. Unknown methods answer gRPC `Unimplemented`. No TLS, gRPC-Web or reflection |
+| `idempotency` | `with_idempotency(router, Idempotency::new(store))`: `Idempotency-Key` on POST/PUT/PATCH/DELETE, keyed per principal, key, method and path with a SHA-256 of the body. A retry replays the stored response (`Idempotent-Replayed: true`); a retry in flight answers 409, a reused key with another body 422, both problem+json. 5xx answers release the key instead of being cached. `IdempotencyStore` trait plus `MemoryIdempotencyStore`; rustclamp-postgres has a shared store |
 | `ws` | `ws_route`: `GET` WebSocket upgrade; open sockets get a close frame (1001) on shutdown so they do not hold the drain open |
 
 Full documentation: <https://docs.rustclamp.com>
