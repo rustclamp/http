@@ -7,6 +7,12 @@ Modules contribute routes; this crate validates them (duplicate paths fail at
 composition time) and compiles them into a plain Axum `Router`. You keep the
 listener, the runtime and any extra middleware. Core and Kernel stay free of HTTP types.
 
+Use it for async APIs and services: many long-held connections, gRPC, or
+Tower and Axum middleware. A server-rendered web app (pages, forms, sessions,
+login) uses the synchronous `web` feature of `rustclamp` instead
+(`clamp init NAME --web`). [ADR 0041](https://github.com/rustclamp/rustclamp/blob/main/docs/adr/0041-two-http-stacks.md)
+explains the choice.
+
 ## Install
 
 Rust 1.88+ (1.85+ without the `grpc` feature), edition 2024:
